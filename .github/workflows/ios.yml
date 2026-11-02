@@ -1,0 +1,97 @@
+name: iOS build
+
+on:
+  push:
+    branches: [main]
+    tags: ["ios-*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ios-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ipa:
+    name: Build IPA
+    runs-on: macos-15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Show toolchain
+        run: xcodebuild -version
+
+      - name: Archive for device (unsigned)
+        env:
+          ARCHIVE_PATH: ${{ runner.temp }}/Minosoft.xcarchive
+        run: |
+          set -euo pipefail
+          xcodebuild \
+            -project Minosoft.xcodeproj \
+            -scheme Minosoft \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -archivePath "$ARCHIVE_PATH" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            archive
+
+      - name: Package IPA
+        id: package
+        env:
+          ARCHIVE_PATH: ${{ runner.temp }}/Minosoft.xcarchive
+        run: |
+          set -euo pipefail
+          APP_PATH="$(find "$ARCHIVE_PATH/Products/Applications" -maxdepth 1 -name '*.app' -print -quit)"
+          if [ -z "$APP_PATH" ]; then
+            echo "No .app inside the archive" >&2
+            exit 1
+          fi
+
+          VERSION="$(/usr/libexec/PlistBuddy -c 'Print :ApplicationProperties:CFBundleShortVersionString' "$ARCHIVE_PATH/Info.plist" 2>/dev/null || echo 0.1.0)"
+          BUILD="$(/usr/libexec/PlistBuddy -c 'Print :ApplicationProperties:CFBundleVersion' "$ARCHIVE_PATH/Info.plist" 2>/dev/null || echo 1)"
+          IPA="Minosoft-${VERSION}-${BUILD}.ipa"
+
+          rm -rf Payload
+          mkdir -p Payload
+          cp -R "$APP_PATH" Payload/
+          zip -qry "$IPA" Payload
+          rm -rf Payload
+
+          echo "ipa=$IPA" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          ls -lh "$IPA"
+
+      - name: Upload IPA as workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Minosoft-ipa
+          path: ${{ steps.package.outputs.ipa }}
+          if-no-files-found: error
+
+      - name: Publish release for a tag
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ steps.package.outputs.ipa }}
+          generate_release_notes: true
+          body: |
+            Unsigned Minosoft iOS build (IPhoneOS arm64, no code signing).
+            Install it with your own signing setup, e.g. sideloading tools or a development team.
+
+      - name: Publish release for a main build
+        if: github.ref == 'refs/heads/main'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ios-${{ github.run_number }}
+          name: Minosoft iOS ${{ steps.package.outputs.version }} (build ${{ github.run_number }})
+          target_commitish: ${{ github.sha }}
+          files: ${{ steps.package.outputs.ipa }}
+          body: |
+            Unsigned Minosoft iOS build from `${{ github.sha }}` (IPhoneOS arm64, no code signing).
+            Install it with your own signing setup, e.g. sideloading tools or a development team.
